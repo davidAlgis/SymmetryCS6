@@ -13,6 +13,8 @@
  *   - Skip transforms on empty/non-raster layers.
  *   - Deselect pixel selections before each transform.
  *   - Use FTcs/Qcsi + Pstn + Ofst for exact document-center pivot.
+ *
+ * At the end, the PAINT_HERE layer is re-selected for safe painting.
  */
 
 #target photoshop
@@ -23,7 +25,6 @@ app.bringToFront();
     var SHOW_OVERLAY_PATHS       = true;   // Path overlay (diagonals/cross)
     var FORCE_PATH_TOOL_VISIBLE  = true;   // Keep path outlines visible
     var KEEP_WEDGE_SELECTION_ON  = true;   // Persistent marching ants
-    // NO RING and NO GUIDES (as requested)
 
     // Wedge angles (degrees)
     var DEG1 = 180.0;    // left (horizontal)
@@ -50,6 +51,16 @@ app.bringToFront();
         }
         var lay = d.artLayers.add(); lay.name = "PAINT_HERE"; lay.kind = LayerKind.NORMAL; return lay;
     }
+    function selectPaintLayer() {
+        var d = app.activeDocument;
+        for (var i = 0; i < d.layers.length; i++) {
+            var L = d.layers[i];
+            if (isRasterArtLayer(L) && L.name === "PAINT_HERE") {
+                d.activeLayer = L; return L;
+            }
+        }
+        return null;
+    }
     function deleteGroupIfExists(name) {
         var d = app.activeDocument;
         for (var i = d.layerSets.length - 1; i >= 0; i--) { if (d.layerSets[i].name === name) { d.layerSets[i].remove(); } }
@@ -64,14 +75,13 @@ app.bringToFront();
         try {
             var cx = d.width.as('px') / 2, cy = d.height.as('px') / 2;
             var tol = 0.5; // px tolerance
-            // iterate from end because removing mutates the list
             for (var i = d.guides.length - 1; i >= 0; i--) {
                 var g = d.guides[i];
                 try {
                     var val = g.coordinate.as('px');
                     if (g.direction === Direction.VERTICAL && Math.abs(val - cx) <= tol) { g.remove(); }
                     else if (g.direction === Direction.HORIZONTAL && Math.abs(val - cy) <= tol) { g.remove(); }
-                } catch (e) { /* ignore */ }
+                } catch (e) {}
             }
         } finally { app.preferences.rulerUnits = prev; }
     }
@@ -81,17 +91,16 @@ app.bringToFront();
         if (!SHOW_OVERLAY_PATHS) { return; }
         var d = app.activeDocument, prev = app.preferences.rulerUnits; app.preferences.rulerUnits = Units.PIXELS;
 
-        // delete old overlay path if present
         try { d.pathItems.getByName("__RADIAL_PATHS__").remove(); } catch (e) {}
 
         try {
             var w = d.width.as('px'), h = d.height.as('px');
             var cx = w / 2, cy = h / 2;
-            var R  = Math.sqrt(w * w + h * h) * 1.2; // extend beyond canvas
+            var R  = Math.sqrt(w * w + h * h) * 1.2;
 
             function ptFromAngle(deg, radius) {
                 var rad = deg * Math.PI / 180.0;
-                return [cx + radius * Math.cos(rad), cy - radius * Math.sin(rad)]; // canvas Y down
+                return [cx + radius * Math.cos(rad), cy - radius * Math.sin(rad)];
             }
             function makeLine(p0, p1) {
                 var pA = new PathPointInfo(), pB = new PathPointInfo();
@@ -103,10 +112,8 @@ app.bringToFront();
             }
 
             var subs = [];
-            // Diagonal borders (rays)
             subs.push(makeLine(ptFromAngle(DEG1, 0.0), ptFromAngle(DEG1, R)));
             subs.push(makeLine(ptFromAngle(DEG2, 0.0), ptFromAngle(DEG2, R)));
-            // Tiny center cross
             var crossLen = Math.max(6, Math.min(w, h) * 0.01);
             subs.push(makeLine([cx - crossLen, cy], [cx + crossLen, cy]));
             subs.push(makeLine([cx, cy - crossLen], [cx, cy + crossLen]));
@@ -134,13 +141,13 @@ app.bringToFront();
     }
     function enforceWedgeOnLayerPixels() {
         var d = app.activeDocument;
-        selectLeftUpperWedge(true);        // triangular wedge selection
-        d.selection.invert();              // anything outside
-        d.selection.clear();               // clear outside the wedge
-        d.selection.deselect();            // leave no selection during transforms
+        selectLeftUpperWedge(true);
+        d.selection.invert();
+        d.selection.clear();
+        d.selection.deselect();
     }
 
-    // ======= DOCUMENT-CENTER ROTATION (avoids error 8800) =======
+    // ======= DOCUMENT-CENTER ROTATION =======
     function rotateLayerAboutDocCenter(layer, degrees) {
         if (!isRasterArtLayer(layer) || !hasPixels(layer)) { return; }
         var d = app.activeDocument;
@@ -157,24 +164,20 @@ app.bringToFront();
         ref.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
         desc.putReference(charIDToTypeID("null"), ref);
 
-        // independent transform center
         desc.putEnumerated(charIDToTypeID("FTcs"),
                            charIDToTypeID("QCSt"),
                            charIDToTypeID("Qcsi"));
 
-        // pivot at document center
         var pDesc = new ActionDescriptor();
         pDesc.putUnitDouble(charIDToTypeID("Hrzn"), charIDToTypeID("#Pxl"), cx);
         pDesc.putUnitDouble(charIDToTypeID("Vrtc"), charIDToTypeID("#Pxl"), cy);
         desc.putObject(charIDToTypeID("Pstn"), charIDToTypeID("Pnt "), pDesc);
 
-        // zero offset
         var oDesc = new ActionDescriptor();
         oDesc.putUnitDouble(charIDToTypeID("Hrzn"), charIDToTypeID("#Pxl"), 0.0);
         oDesc.putUnitDouble(charIDToTypeID("Vrtc"), charIDToTypeID("#Pxl"), 0.0);
         desc.putObject(charIDToTypeID("Ofst"), charIDToTypeID("Ofst"), oDesc);
 
-        // rotation angle
         desc.putUnitDouble(charIDToTypeID("Angl"), charIDToTypeID("#Ang"), degrees);
 
         executeAction(idTrnf, desc, DialogModes.NO);
@@ -184,16 +187,12 @@ app.bringToFront();
     function run() {
         assertDoc();
 
-        // Remove any center guides that may have been created by earlier versions
         removeCenterGuidesIfPresent();
-
-        // Draw/update non-printing overlay (diagonals + cross only)
         addOverlayPaths();
 
         var d = app.activeDocument;
         var base = ensurePaintLayer();
 
-        // Enforce wedge on the source content
         d.activeLayer = base;
         enforceWedgeOnLayerPixels();
 
@@ -201,10 +200,10 @@ app.bringToFront();
             deleteGroupIfExists("Mirrors_8");
             alert("Nothing in the left-upper wedge on 'PAINT_HERE'. Draw there, then run again.");
             if (KEEP_WEDGE_SELECTION_ON) { selectLeftUpperWedge(true); }
+            selectPaintLayer(); // ensure PAINT_HERE is active anyway
             return;
         }
 
-        // Build rotated copies
         deleteGroupIfExists("Mirrors_8");
         var grp = newGroupAbove(base, "Mirrors_8");
 
@@ -214,13 +213,15 @@ app.bringToFront();
             rotateLayerAboutDocCenter(dup, 45 * k);
         }
 
-        // Persistent visuals
         if (KEEP_WEDGE_SELECTION_ON) { selectLeftUpperWedge(true); } else { d.selection.deselect(); }
         if (SHOW_OVERLAY_PATHS) {
             try { d.pathItems.getByName("__RADIAL_PATHS__").select(); } catch (e) {}
             if (FORCE_PATH_TOOL_VISIBLE) { try { app.currentTool = 'pathComponentSelectTool'; } catch (eTool) {} }
         }
+
+        // Finally, re-select PAINT_HERE so user keeps drawing on the safe layer
+        selectPaintLayer();
     }
 
-    app.activeDocument.suspendHistory("Radial-8 (no ring, no guides)", "run()");
+    app.activeDocument.suspendHistory("Radial-8 (safe painting)", "run()");
 })();

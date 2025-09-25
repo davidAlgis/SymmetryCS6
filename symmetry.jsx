@@ -1,15 +1,18 @@
 /**
  * Radial-8 symmetry (fixed base wedge) — CS6
  * - Base wedge: LEFT-UPPER (180° -> 135° from document center)
- * - Draw inside the wedge on "PAINT_HERE" (raster layer). Script duplicates into 8 sectors.
- * - Visuals (non-printing):
- *     (A) Persistent wedge selection (marching ants)
- *     (B) Path overlay (diagonals, cross, ring) + auto-switch to Path Selection tool
+ * - Draw inside the wedge on "PAINT_HERE" (raster layer).
+ * - Duplicates content into 8 sectors, rotating about the EXACT document center.
+ *
+ * Visuals (non-printing):
+ *   - Persistent wedge selection (marching ants) to enforce painting region.
+ *   - Path overlay for the two diagonals + tiny center cross (NO RING).
+ *   - No blue guides are created; any center guides from earlier runs are removed.
  *
  * Error 8800 avoidance:
- * - Skip transforms on empty/non-raster layers
- * - Deselect pixel selections before each transform
- * - Use FTcs/Qcsi + Pstn + Ofst for exact document-center pivot
+ *   - Skip transforms on empty/non-raster layers.
+ *   - Deselect pixel selections before each transform.
+ *   - Use FTcs/Qcsi + Pstn + Ofst for exact document-center pivot.
  */
 
 #target photoshop
@@ -17,11 +20,10 @@ app.bringToFront();
 
 (function () {
     // ======= CONFIG =======
-    var SHOW_OVERLAY_PATHS       = true;   // Path overlay (diagonals/cross/ring)
-    var FORCE_PATH_TOOL_VISIBLE  = true;   // Switch to Path Selection tool so magenta paths remain visible
-    var ADD_RING                 = true;   // Add a ring path around center
-    var RING_SCALE               = 0.25;   // Ring radius = RING_SCALE * min(docW, docH)
-    var KEEP_WEDGE_SELECTION_ON  = true;   // Keep wedge selection active (persistent marching ants)
+    var SHOW_OVERLAY_PATHS       = true;   // Path overlay (diagonals/cross)
+    var FORCE_PATH_TOOL_VISIBLE  = true;   // Keep path outlines visible
+    var KEEP_WEDGE_SELECTION_ON  = true;   // Persistent marching ants
+    // NO RING and NO GUIDES (as requested)
 
     // Wedge angles (degrees)
     var DEG1 = 180.0;    // left (horizontal)
@@ -56,34 +58,41 @@ app.bringToFront();
         var g = app.activeDocument.layerSets.add(); g.name = name; g.move(ref, ElementPlacement.PLACEAFTER); return g;
     }
 
-    // ======= GUIDES =======
-    function addCenterGuides() {
+    // ======= GUIDES: remove old center guides (no new guides created) =======
+    function removeCenterGuidesIfPresent() {
         var d = app.activeDocument, prev = app.preferences.rulerUnits; app.preferences.rulerUnits = Units.PIXELS;
         try {
             var cx = d.width.as('px') / 2, cy = d.height.as('px') / 2;
-            try { d.guides.add(Direction.VERTICAL,   UnitValue(cx, 'px')); } catch (e) {}
-            try { d.guides.add(Direction.HORIZONTAL, UnitValue(cy, 'px')); } catch (e) {}
+            var tol = 0.5; // px tolerance
+            // iterate from end because removing mutates the list
+            for (var i = d.guides.length - 1; i >= 0; i--) {
+                var g = d.guides[i];
+                try {
+                    var val = g.coordinate.as('px');
+                    if (g.direction === Direction.VERTICAL && Math.abs(val - cx) <= tol) { g.remove(); }
+                    else if (g.direction === Direction.HORIZONTAL && Math.abs(val - cy) <= tol) { g.remove(); }
+                } catch (e) { /* ignore */ }
+            }
         } finally { app.preferences.rulerUnits = prev; }
     }
 
-    // ======= PATH OVERLAY (non-printing) =======
+    // ======= PATH OVERLAY (non-printing, NO RING) =======
     function addOverlayPaths() {
         if (!SHOW_OVERLAY_PATHS) { return; }
         var d = app.activeDocument, prev = app.preferences.rulerUnits; app.preferences.rulerUnits = Units.PIXELS;
 
-        // delete old path if present
+        // delete old overlay path if present
         try { d.pathItems.getByName("__RADIAL_PATHS__").remove(); } catch (e) {}
 
         try {
             var w = d.width.as('px'), h = d.height.as('px');
             var cx = w / 2, cy = h / 2;
-            var R  = Math.sqrt(w * w + h * h) * 1.2; // long enough to exceed canvas
+            var R  = Math.sqrt(w * w + h * h) * 1.2; // extend beyond canvas
 
             function ptFromAngle(deg, radius) {
                 var rad = deg * Math.PI / 180.0;
                 return [cx + radius * Math.cos(rad), cy - radius * Math.sin(rad)]; // canvas Y down
             }
-
             function makeLine(p0, p1) {
                 var pA = new PathPointInfo(), pB = new PathPointInfo();
                 pA.kind = PointKind.CORNERPOINT; pB.kind = PointKind.CORNERPOINT;
@@ -94,31 +103,13 @@ app.bringToFront();
             }
 
             var subs = [];
-            // (1) Wedge border 1 (DEG1)
+            // Diagonal borders (rays)
             subs.push(makeLine(ptFromAngle(DEG1, 0.0), ptFromAngle(DEG1, R)));
-            // (2) Wedge border 2 (DEG2)
             subs.push(makeLine(ptFromAngle(DEG2, 0.0), ptFromAngle(DEG2, R)));
-            // (3) Tiny center cross
+            // Tiny center cross
             var crossLen = Math.max(6, Math.min(w, h) * 0.01);
             subs.push(makeLine([cx - crossLen, cy], [cx + crossLen, cy]));
             subs.push(makeLine([cx, cy - crossLen], [cx, cy + crossLen]));
-            // (4) Optional ring
-            if (ADD_RING) {
-                var ringR = Math.min(w, h) * RING_SCALE;
-                var pts = [];
-                for (var k = 0; k < 12; k++) {
-                    var th = 2 * Math.PI * k / 12;
-                    var x = cx + ringR * Math.cos(th);
-                    var y = cy - ringR * Math.sin(th);
-                    var p = new PathPointInfo();
-                    p.kind = PointKind.CORNERPOINT;
-                    p.anchor = p.leftDirection = p.rightDirection = [x, y];
-                    pts.push(p);
-                }
-                var ring = new SubPathInfo(); ring.closed = true; ring.operation = ShapeOperation.SHAPEXOR;
-                ring.entireSubPath = pts;
-                subs.push(ring);
-            }
 
             d.pathItems.add("__RADIAL_PATHS__", subs);
             try { d.pathItems.getByName("__RADIAL_PATHS__").select(); } catch (eSel) {}
@@ -127,35 +118,33 @@ app.bringToFront();
         }
 
         if (FORCE_PATH_TOOL_VISIBLE) {
-            // Keep path rendering visible by switching to Path Selection tool
             try { app.currentTool = 'pathComponentSelectTool'; } catch (eTool) {}
         }
     }
 
-    // ======= WEDGE SELECTION =======
-    function selectLeftUpperWedge(replaceOrAdd) {
+    // ======= WEDGE SELECTION (persistent marching ants) =======
+    function selectLeftUpperWedge(replace) {
         var d = app.activeDocument, prev = app.preferences.rulerUnits; app.preferences.rulerUnits = Units.PIXELS;
         try {
             var w = d.width.as('px'), h = d.height.as('px'), cx = w / 2, cy = h / 2, R = Math.sqrt(w * w + h * h) * 2;
             function pt(deg) { var rad = deg * Math.PI / 180.0; return [cx + R * Math.cos(rad), cy - R * Math.sin(rad)]; }
             var p180 = pt(DEG1), p135 = pt(DEG2);
-            var selType = replaceOrAdd ? SelectionType.REPLACE : SelectionType.EXTEND;
-            d.selection.select([[cx, cy], p180, p135], selType, 0, true);
+            d.selection.select([[cx, cy], p180, p135], replace ? SelectionType.REPLACE : SelectionType.EXTEND, 0, true);
         } finally { app.preferences.rulerUnits = prev; }
     }
     function enforceWedgeOnLayerPixels() {
         var d = app.activeDocument;
-        selectLeftUpperWedge(true);        // make triangular wedge selection
+        selectLeftUpperWedge(true);        // triangular wedge selection
         d.selection.invert();              // anything outside
         d.selection.clear();               // clear outside the wedge
         d.selection.deselect();            // leave no selection during transforms
     }
 
-    // ======= EXACT DOC-CENTER ROTATION =======
+    // ======= DOCUMENT-CENTER ROTATION (avoids error 8800) =======
     function rotateLayerAboutDocCenter(layer, degrees) {
-        if (!isRasterArtLayer(layer) || !hasPixels(layer)) { return; } // avoids 8800
+        if (!isRasterArtLayer(layer) || !hasPixels(layer)) { return; }
         var d = app.activeDocument;
-        d.selection.deselect();               // selections can break transforms
+        d.selection.deselect();
         d.activeLayer = layer;
 
         var cx = d.width.as('px') / 2;
@@ -164,7 +153,6 @@ app.bringToFront();
         var idTrnf = charIDToTypeID("Trnf");
         var desc = new ActionDescriptor();
 
-        // target current layer
         var ref = new ActionReference();
         ref.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
         desc.putReference(charIDToTypeID("null"), ref);
@@ -195,9 +183,11 @@ app.bringToFront();
     // ======= MAIN =======
     function run() {
         assertDoc();
-        addCenterGuides();
 
-        // Draw/update non-printing overlays
+        // Remove any center guides that may have been created by earlier versions
+        removeCenterGuidesIfPresent();
+
+        // Draw/update non-printing overlay (diagonals + cross only)
         addOverlayPaths();
 
         var d = app.activeDocument;
@@ -210,10 +200,7 @@ app.bringToFront();
         if (!hasPixels(base)) {
             deleteGroupIfExists("Mirrors_8");
             alert("Nothing in the left-upper wedge on 'PAINT_HERE'. Draw there, then run again.");
-            // Recreate visible wedge selection so user sees the allowed zone
-            if (KEEP_WEDGE_SELECTION_ON) {
-                selectLeftUpperWedge(true); // leave selection active
-            }
+            if (KEEP_WEDGE_SELECTION_ON) { selectLeftUpperWedge(true); }
             return;
         }
 
@@ -227,26 +214,13 @@ app.bringToFront();
             rotateLayerAboutDocCenter(dup, 45 * k);
         }
 
-        // PERSISTENT VISUALS:
-        // (A) Keep wedge selection on (persistent marching ants, non-printing)
-        if (KEEP_WEDGE_SELECTION_ON) {
-            selectLeftUpperWedge(true); // do NOT deselect at the end
-        } else {
-            d.selection.deselect();
-        }
-
-        // (B) Keep path overlay selected and visible
+        // Persistent visuals
+        if (KEEP_WEDGE_SELECTION_ON) { selectLeftUpperWedge(true); } else { d.selection.deselect(); }
         if (SHOW_OVERLAY_PATHS) {
             try { d.pathItems.getByName("__RADIAL_PATHS__").select(); } catch (e) {}
-            if (FORCE_PATH_TOOL_VISIBLE) {
-                try { app.currentTool = 'pathComponentSelectTool'; } catch (eTool) {}
-            }
+            if (FORCE_PATH_TOOL_VISIBLE) { try { app.currentTool = 'pathComponentSelectTool'; } catch (eTool) {} }
         }
-
-        // No alert here, to avoid tool/selection focus changes
-        // If you want a beep, uncomment:
-        // app.beep();
     }
 
-    app.activeDocument.suspendHistory("Radial-8 (persistent visuals)", "run()");
+    app.activeDocument.suspendHistory("Radial-8 (no ring, no guides)", "run()");
 })();
